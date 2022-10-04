@@ -1,6 +1,6 @@
 from . import *
 
-def training_resnet(log_file,save_file,stop_iter=5,epochs=100,batch_size=256,learning_rate=0.1,image_size=224,
+def training_resnet_finetuning(load_filename,log_file,save_file,freeze=True,stop_iter=5,epochs=100,batch_size=256,learning_rate=0.1,image_size=224,
                     using_model='resnet18',
                                random_seed = 2,use_domain = [0,1,2],leave_one_domain = 3, entropy_hyperparam = 0.,
                                using_dataset = 'OfficeHome',root_path = '/home/eslab/dataset/OfficeHome/',
@@ -72,9 +72,9 @@ def training_resnet(log_file,save_file,stop_iter=5,epochs=100,batch_size=256,lea
         domain_name = file_path.split('/')[-3]
         dataset_dic[domain_name][class_name].append(file_path)
 
-    train_list,val_list, test_list, leave_list = split_officehome_dataset_leave_one_domain_out(dataset_dic,use_domain,leave_one_domain)
+    train_list,val_list, test_list = split_officehome_dataset_one_domain(dataset_dic,use_domain)
     print('list len')
-    print(len(train_list),len(val_list),len(test_list),len(leave_list))
+    print(len(train_list),len(val_list),len(test_list))
     train_dataset = None
     val_dataset = None
     test_dataset = None
@@ -84,7 +84,7 @@ def training_resnet(log_file,save_file,stop_iter=5,epochs=100,batch_size=256,lea
         train_dataset = get_officehome_loader(data_list=train_list,image_size=image_size,training=True)
         val_dataset = get_officehome_loader(data_list=val_list,image_size=image_size,training=False)
         test_dataset = get_officehome_loader(data_list=test_list,image_size=image_size,training=False)
-        leave_one_dataset = get_officehome_loader(data_list=leave_list,image_size=image_size,training=False)
+        # leave_one_dataset = get_officehome_loader(data_list=leave_list,image_size=image_size,training=False)
     # weight & count about training set(for generalization)
     weights,count = make_weights_for_balanced_classes(train_dataset.dataset_list,using_dataset,class_num)
     
@@ -99,17 +99,31 @@ def training_resnet(log_file,save_file,stop_iter=5,epochs=100,batch_size=256,lea
     leave_one_dataloader = DataLoader(dataset=leave_one_dataset, batch_size=batch_size,shuffle=False, num_workers=(cpu_num//4))
     
     print('='*20 + 'dataloader length' + '='*20)
-    print(train_dataset.__len__(),val_dataset.__len__(),test_dataset.__len__(),leave_one_dataset.__len__())
+    print(train_dataset.__len__(),val_dataset.__len__(),test_dataset.__len__())
     # sleep(5)
     # return
     if using_model =='resnet18':    
-        model = resnet18(pretrained=True)
+        model = resnet18(pretrained=False)
     else:
         print('---None model architecture---')
+    
     
     in_features = model.fc.in_features
     # for key,value in model.
     model.fc = nn.Linear(in_features,class_num)
+
+    # load model weight
+    model.load_state_dict(torch.load(load_filename)['model_state_dict'])
+    if freeze:
+        for name, param in model.named_parameters():
+            if name.split('.')[0] != 'fc':
+                param.requires_grad = False
+                # print(f'{name} is Not Freezed!')
+                # param.requires_grad = True
+            else:
+                # print(f'{name} is Freezed!')
+                # param.requires_grad = False
+                print(f'{name} is Not Freezed!')
     summary(model.cuda(),(3,224,224))
     
     if cuda:
@@ -299,36 +313,6 @@ def training_resnet(log_file,save_file,stop_iter=5,epochs=100,batch_size=256,lea
             sys.stdout.write(output_str)
             check_file.write(output_str)
 
-            test_total_count = 0
-            test_total_data = 0
-
-            with tqdm(leave_one_dataloader,desc='leave_one_dataset',unit='batch') as tepoch:
-                for index,(img, label,domain) in enumerate(tepoch):
-                    img = img.to(device)
-                    label = label.long().to(device)
-
-                    with torch.no_grad():
-                        pred = model(img)
-
-                        loss = loss_fn(pred, label)
-
-                        # acc
-                        _, predict = torch.max(pred, 1)
-                        check_count = (predict == label).sum().item()
-
-                        test_total_count += check_count
-                        test_total_data += len(img)
-                        accuracy = test_total_count / test_total_data
-                        tepoch.set_postfix(accuracy=100.*accuracy)
-
-
-            test_accuracy = test_total_count / test_total_data * 100
-            best_leave_test_accuracy = test_accuracy
-            output_str = 'leave test dataset : %d/%d epochs spend time : %.4f sec  / correct : %d/%d -> %.4f%%\n' \
-                        % (epoch + 1, epochs, time.time() - start_time,
-                            test_total_count, test_total_data, test_accuracy)
-            sys.stdout.write(output_str)
-            check_file.write(output_str)
         else:
             if best_val_acc < val_accuracy:
                 best_val_acc = val_accuracy
@@ -381,44 +365,15 @@ def training_resnet(log_file,save_file,stop_iter=5,epochs=100,batch_size=256,lea
                                 test_total_count, test_total_data, test_accuracy)
                 sys.stdout.write(output_str)
                 check_file.write(output_str)
-                test_total_count = 0
-                test_total_data = 0
-
-                with tqdm(leave_one_dataloader,desc='leave_one_dataset',unit='batch') as tepoch:
-                    for index,(img, label,domain) in enumerate(tepoch):
-                        img = img.to(device)
-                        label = label.long().to(device)
-
-                        with torch.no_grad():
-                            pred = model(img)
-
-                            loss = loss_fn(pred, label)
-
-                            # acc
-                            _, predict = torch.max(pred, 1)
-                            check_count = (predict == label).sum().item()
-
-                            test_total_count += check_count
-                            test_total_data += len(img)
-                            accuracy = test_total_count / test_total_data
-                            tepoch.set_postfix(accuracy=100.*accuracy)
-
-
-                test_accuracy = test_total_count / test_total_data * 100
-                best_leave_test_accuracy = test_accuracy
-                output_str = 'leave test dataset : %d/%d epochs spend time : %.4f sec  / correct : %d/%d -> %.4f%%\n' \
-                            % (epoch + 1, epochs, time.time() - start_time,
-                                test_total_count, test_total_data, test_accuracy)
-                sys.stdout.write(output_str)
-                check_file.write(output_str)
+                
             else:
                 stop_count += 1
                 
         if stop_count > stop_iter:
             print('Early Stopping')
-            output_str = 'best epoch : %d/%d spend time : %.4f sec  / best test accuracy : %.4f%% / best leave-one-domain accuracy : %.4f%% \n' \
+            output_str = 'best epoch : %d/%d spend time : %.4f sec  / best test accuracy : %.4f%%  \n' \
                             % (best_epoch+1, epochs, time.time() - start_time,
-                                best_test_accuracy,best_leave_test_accuracy)
+                                best_test_accuracy)
             sys.stdout.write(output_str)
             check_file.write(output_str)
             

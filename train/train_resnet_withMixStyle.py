@@ -1,12 +1,12 @@
 from . import *
 
-def training_resnet(log_file,save_file,stop_iter=5,epochs=100,batch_size=256,learning_rate=0.1,image_size=224,
-                    using_model='resnet18',
-                               random_seed = 2,use_domain = [0,1,2],leave_one_domain = 3, entropy_hyperparam = 0.,
+
+def training_resnet_withMixStyle(log_file,save_file,stop_iter=5,epochs=100,batch_size=256,learning_rate=0.1,image_size=224,
+                    using_model='resnet18',using_mixstyle=False,mixstyle_layer=[0,1],
+                               random_seed = 2,use_domain = [0,1,2],leave_one_domain = 3, 
                                using_dataset = 'OfficeHome',root_path = '/home/eslab/dataset/OfficeHome/',
                                use_gpu=True,gpu_num=[0,1,2,3]):
     
-
     
     print('logging filename : ',log_file)
     print('save filename : ',save_file)
@@ -16,14 +16,13 @@ def training_resnet(log_file,save_file,stop_iter=5,epochs=100,batch_size=256,lea
         class_num = 65
     elif using_dataset == 'PACS':
         class_num = 7
-
     b1 = 0.5
     b2 = 0.999
 
     beta = 0.001
     norm_square = 2
     
-    
+    image_size = 224
 
     cpu_num = multiprocessing.cpu_count()
     cuda = torch.cuda.is_available()
@@ -35,18 +34,9 @@ def training_resnet(log_file,save_file,stop_iter=5,epochs=100,batch_size=256,lea
     
     device = torch.device(f"cuda" if torch.cuda.is_available() else "cpu")
     
-
-    # random.seed(random_seed) # seed
-    # np.random.seed(random_seed)
-    # torch.manual_seed(random_seed)
-
-    torch.manual_seed(random_seed)
-    torch.cuda.manual_seed(random_seed)
-    torch.cuda.manual_seed_all(random_seed) # if use multi-GPU
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    random.seed(random_seed) # seed
     np.random.seed(random_seed)
-    random.seed(random_seed)
+    torch.manual_seed(random_seed)
     
     list_dir = os.listdir(root_path)
 
@@ -58,33 +48,28 @@ def training_resnet(log_file,save_file,stop_iter=5,epochs=100,batch_size=256,lea
             check_dir.append(root_path + check_name + '/')
         
     print(check_dir)
-    
-    
     if using_dataset == 'OfficeHome':
-        dataset_dic = officeHome_dic()
+        dataset_dic = dataset_dic_officeHome
     elif using_dataset == 'PACS':
         dataset_dic = dataset_dic_PACS
 
     img_list = search(root_path)
-    # print('img_list len = ',len(img_list))
+    # print(img_list)
     for file_path in img_list:
         class_name = file_path.split('/')[-2]
         domain_name = file_path.split('/')[-3]
         dataset_dic[domain_name][class_name].append(file_path)
 
     train_list,val_list, test_list, leave_list = split_officehome_dataset_leave_one_domain_out(dataset_dic,use_domain,leave_one_domain)
-    print('list len')
+
     print(len(train_list),len(val_list),len(test_list),len(leave_list))
-    train_dataset = None
-    val_dataset = None
-    test_dataset = None
-    leave_one_dataset = None
+    
     if using_dataset == 'OfficeHome':
         # custom dataloader     
         train_dataset = get_officehome_loader(data_list=train_list,image_size=image_size,training=True)
         val_dataset = get_officehome_loader(data_list=val_list,image_size=image_size,training=False)
         test_dataset = get_officehome_loader(data_list=test_list,image_size=image_size,training=False)
-        leave_one_dataset = get_officehome_loader(data_list=leave_list,image_size=image_size,training=False)
+    leave_one_dataset = get_officehome_loader(data_list=leave_list,image_size=image_size,training=False)
     # weight & count about training set(for generalization)
     weights,count = make_weights_for_balanced_classes(train_dataset.dataset_list,using_dataset,class_num)
     
@@ -100,10 +85,9 @@ def training_resnet(log_file,save_file,stop_iter=5,epochs=100,batch_size=256,lea
     
     print('='*20 + 'dataloader length' + '='*20)
     print(train_dataset.__len__(),val_dataset.__len__(),test_dataset.__len__(),leave_one_dataset.__len__())
-    # sleep(5)
-    # return
-    if using_model =='resnet18':    
-        model = resnet18(pretrained=True)
+    
+    if using_model =='resnet18':   
+        model = resnet18(pretrained=True,mixStyle=using_mixstyle,mixstyle_layer=mixstyle_layer)
     else:
         print('---None model architecture---')
     
@@ -125,9 +109,7 @@ def training_resnet(log_file,save_file,stop_iter=5,epochs=100,batch_size=256,lea
     
     # loss function
     loss_fn = nn.CrossEntropyLoss().to(device)
-    if entropy_hyperparam > 0.:
-        print('use Entropy Loss Function')
-        loss_entropy = Entropy().to(device)
+    
     # optimization
     optimizer = torch.optim.SGD([{'params': model.parameters()}], lr=learning_rate, momentum=0.9)
     
@@ -159,7 +141,7 @@ def training_resnet(log_file,save_file,stop_iter=5,epochs=100,batch_size=256,lea
         start_time = time.time()
         
         model.train()
-
+        model.apply(activate_mixstyle)
         output_str = 'classification_lr : %f\n'%(optimizer.state_dict()['param_groups'][0]['lr'])
         sys.stdout.write(output_str)
         check_file.write(output_str)
@@ -172,11 +154,8 @@ def training_resnet(log_file,save_file,stop_iter=5,epochs=100,batch_size=256,lea
                 optimizer.zero_grad()
                 
                 pred = model(img)
-                if entropy_hyperparam > 0.:
-                    print('Using Entropy loss function!!!')
-                    loss = loss_fn(pred,label) - entropy_hyperparam * loss_entropy(pred)
-                else:
-                    loss = loss_fn(pred, label) # + beta * norm
+
+                loss = loss_fn(pred, label) # + beta * norm
 
                 _, predict = torch.max(pred, 1)
                 check_count = (predict == label).sum().item()
@@ -208,10 +187,7 @@ def training_resnet(log_file,save_file,stop_iter=5,epochs=100,batch_size=256,lea
         # check validation dataset
         start_time = time.time()
         model.eval()
-        val_total_loss = 0.0
-        val_total_count = 0
-        val_total_data = 0
-
+        model.apply(deactivate_mixstyle)
         with tqdm(val_dataloader,desc='Validation',unit='batch') as tepoch:
             for index,(img, label,domain) in enumerate(tepoch):
                 img = img.to(device)
@@ -270,7 +246,8 @@ def training_resnet(log_file,save_file,stop_iter=5,epochs=100,batch_size=256,lea
             test_total_data = 0
             # check validation dataset
             start_time = time.time()
-            model.eval()              
+            model.eval()   
+            model.apply(deactivate_mixstyle)           
             with tqdm(test_dataloader,desc='Test',unit='batch') as tepoch:
                 for index,(img, label,domain) in enumerate(tepoch):
                     img = img.to(device)
@@ -298,9 +275,6 @@ def training_resnet(log_file,save_file,stop_iter=5,epochs=100,batch_size=256,lea
                             test_total_count, test_total_data, test_accuracy)
             sys.stdout.write(output_str)
             check_file.write(output_str)
-
-            test_total_count = 0
-            test_total_data = 0
 
             with tqdm(leave_one_dataloader,desc='leave_one_dataset',unit='batch') as tepoch:
                 for index,(img, label,domain) in enumerate(tepoch):
@@ -354,6 +328,7 @@ def training_resnet(log_file,save_file,stop_iter=5,epochs=100,batch_size=256,lea
                 # check validation dataset
                 start_time = time.time()
                 model.eval()              
+                model.apply(deactivate_mixstyle)
                 with tqdm(test_dataloader,desc='Test',unit='batch') as tepoch:
                     for index,(img, label,domain) in enumerate(tepoch):
                         img = img.to(device)
@@ -381,8 +356,6 @@ def training_resnet(log_file,save_file,stop_iter=5,epochs=100,batch_size=256,lea
                                 test_total_count, test_total_data, test_accuracy)
                 sys.stdout.write(output_str)
                 check_file.write(output_str)
-                test_total_count = 0
-                test_total_data = 0
 
                 with tqdm(leave_one_dataloader,desc='leave_one_dataset',unit='batch') as tepoch:
                     for index,(img, label,domain) in enumerate(tepoch):
